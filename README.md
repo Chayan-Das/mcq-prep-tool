@@ -1,0 +1,1 @@
+mongodb+srv://mcq:<db_password>@cluster0.g7esx7y.mongodb.net/
