@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import clientPromise from "../../../lib/mongodb";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -8,7 +9,7 @@ const MAX_FILE_BYTES = 3 * 1024 * 1024;
 
 // Gemini প্রাইমারি মডেল (ভিশন ভালো)
 const GEMINI_MODELS = [
- "gemini-3.6-flash",
+  "gemini-3.6-flash",
   "gemini-3.5-flash-lite",
   "gemini-4-hydrogen",
   "gemini-3.8-flash",
@@ -31,10 +32,15 @@ interface RawQuestion {
   exam_taker?: unknown;
 }
 
+interface ExistingTaxonomy {
+  subjects: string[];
+  topics: string[];
+  subTopics: string[];
+}
+
 function cleanQuestions(
   list: RawQuestion[],
-  defaultSubject: string,
-  defaultExamTaker: string
+  defaultSubject: string
 ) {
   return list
     .filter((q) => typeof q?.question === "string" && q.question.trim() !== "")
@@ -44,6 +50,10 @@ function cleanQuestions(
         : [];
       while (options.length < 4) options.push("");
       const idx = Number(q.correct_answer_index);
+
+      // exam_taker: শুধুমাত্র ছবিতে থাকলেই রাখব, ডিফল্ট দিব না
+      const examTakerRaw = String(q.exam_taker ?? "").trim();
+
       return {
         question: String(q.question).trim(),
         options: options.slice(0, 4),
@@ -52,12 +62,30 @@ function cleanQuestions(
         subject: String(q.subject || defaultSubject || "").trim(),
         topic: String(q.topic || "").trim(),
         sub_topic: String(q.sub_topic || "").trim(),
-        exam_taker: String(q.exam_taker || defaultExamTaker || "").trim(),
+        exam_taker: examTakerRaw, // খালি থাকলে খালিই থাকবে
       };
     });
 }
 
-function buildPrompt(defaultSubject: string, defaultExamTaker: string) {
+function buildPrompt(
+  defaultSubject: string,
+  existing: ExistingTaxonomy
+) {
+  const subjectList =
+    existing.subjects.length > 0
+      ? existing.subjects.slice(0, 80).join(" | ")
+      : "বাংলা | ইংরেজি | গণিত | সাধারণ জ্ঞান | বিজ্ঞান | বাংলাদেশ বিষয়াবলি | আন্তর্জাতিক বিষয়াবলি";
+
+  const topicList =
+    existing.topics.length > 0
+      ? existing.topics.slice(0, 120).join(" | ")
+      : "(এখনো কোনো টপিক নেই — প্রশ্নের বিষয়বস্তু অনুযায়ী নতুন তৈরি করো)";
+
+  const subTopicList =
+    existing.subTopics.length > 0
+      ? existing.subTopics.slice(0, 100).join(" | ")
+      : "(এখনো কোনো সাব-টপিক নেই — প্রয়োজন হলে নতুন তৈরি করো)";
+
   return `
 তুমি একজন অত্যন্ত দক্ষ বাংলাদেশি চাকরির পরীক্ষার (BCS, Bank, Primary, NTRCA) প্রশ্ন বিশ্লেষক এবং শক্তিশালী OCR + ভিশন মডেল।
 
@@ -68,6 +96,26 @@ function buildPrompt(defaultSubject: string, defaultExamTaker: string) {
 - অস্পষ্ট জায়গায় আশেপাশের শব্দ, বাক্যের গঠন এবং সাধারণ পরীক্ষার প্রশ্নের ধরন দেখে সবচেয়ে যৌক্তিক পাঠ নির্ণয় করবে।
 - "পড়া যাচ্ছে না" বলে বাদ দিবে না — যতটা সম্ভব বের করবে।
 
+===== Subject / Topic / Sub-topic নিয়ম (খুব গুরুত্বপূর্ণ) =====
+১. প্রথমে নিচের ডাটাবেজে থাকা existing লিস্ট থেকে মিলিয়ে নাও।
+২. প্রশ্নের বিষয়বস্তুর সাথে সবচেয়ে কাছাকাছি existing নাম থাকলে ঠিক সেই নামটিই ব্যবহার করো (নতুন বানাবে না)।
+৩. যদি কোনো ভালো মিল না পাওয়া যায়, তখনই প্রশ্নের বিষয়বস্তু অনুযায়ী নতুন subject / topic / sub_topic তৈরি করো।
+৪. Subject সবসময় বাধ্যতামূলক। খালি রাখবে না।
+
+ডাটাবেজে থাকা Subjects:
+${subjectList}
+
+ডাটাবেজে থাকা Topics:
+${topicList}
+
+ডাটাবেজে থাকা Sub-topics:
+${subTopicList}
+
+===== Exam Taker নিয়ম =====
+- ছবিতে পরীক্ষার নাম/সাল (যেমন: ৪৫তম বিসিএস, ২০২৩ ব্যাংক, প্রাইমারি টেট ইত্যাদি) স্পষ্টভাবে লেখা থাকলে শুধুমাত্র তখনই exam_taker দাও।
+- ছবিতে না থাকলে বা সন্দেহ থাকলে exam_taker = "" (খালি স্ট্রিং) রাখো।
+- কখনো অনুমান করে বা ডিফল্ট দিয়ে exam_taker ভরাবে না।
+
 শুধুমাত্র একটি ভ্যালিড JSON অবজেক্ট রিটার্ন করো:
 {
   "questions": [
@@ -75,10 +123,10 @@ function buildPrompt(defaultSubject: string, defaultExamTaker: string) {
       "question": "মূল প্রশ্নটি (প্রশ্নের নম্বর বা সাল বাদ দিয়ে পরিষ্কার প্রশ্ন)",
       "options": ["অপশন ১", "অপশন ২", "অপশন ৩", "অপশন ৪"],
       "correct_answer_index": 0,
-      "subject": "বিষয়ের নাম (যেমন: বাংলা, ইংরেজি, গণিত, সাধারণ জ্ঞান, বিজ্ঞান)। না বুঝলে '${defaultSubject}' দাও",
-      "topic": "অধ্যায় বা টপিকের নাম",
-      "sub_topic": "সাব-টপিক থাকলে দাও, নাহলে ''",
-      "exam_taker": "পরীক্ষার নাম/সাল থাকলে দাও (যেমন: '৪৫তম বিসিএস'), নাহলে '${defaultExamTaker}'"
+      "subject": "বিষয়ের নাম (existing লিস্ট থেকে মিলিয়ে নাও, না মিললে নতুন বানাও)${defaultSubject ? `। না বুঝলে '${defaultSubject}' দাও` : ""}",
+      "topic": "অধ্যায় বা টপিকের নাম (existing থেকে মিলিয়ে নাও, না মিললে নতুন)",
+      "sub_topic": "সাব-টপিক থাকলে দাও (existing থেকে মিলিয়ে), নাহলে ''",
+      "exam_taker": "ছবিতে স্পষ্টভাবে থাকলেই দাও, নাহলে ''"
     }
   ]
 }
@@ -103,12 +151,34 @@ function extractJsonContent(text: string): string {
   return content.slice(firstBrace, lastBrace + 1);
 }
 
+async function fetchExistingTaxonomy(): Promise<ExistingTaxonomy> {
+  try {
+    const client = await clientPromise;
+    const db = client.db("mcq_database");
+    const collection = db.collection("questions");
+
+    const [subjects, topics, subTopics] = await Promise.all([
+      collection.distinct("subject"),
+      collection.distinct("topic"),
+      collection.distinct("sub_topic"),
+    ]);
+
+    return {
+      subjects: (subjects || []).filter(Boolean).map(String),
+      topics: (topics || []).filter(Boolean).map(String),
+      subTopics: (subTopics || []).filter(Boolean).map(String),
+    };
+  } catch (err) {
+    console.error("Failed to fetch existing taxonomy:", err);
+    return { subjects: [], topics: [], subTopics: [] };
+  }
+}
+
 async function tryGemini(
   base64Data: string,
   mimeType: string,
   prompt: string,
-  defaultSubject: string,
-  defaultExamTaker: string
+  defaultSubject: string
 ): Promise<{ questions: ReturnType<typeof cleanQuestions> } | { error: string }> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -184,8 +254,7 @@ async function tryGemini(
       const parsed = JSON.parse(jsonStr);
       const questions = cleanQuestions(
         Array.isArray(parsed.questions) ? parsed.questions : [],
-        defaultSubject,
-        defaultExamTaker
+        defaultSubject
       );
 
       if (questions.length === 0) {
@@ -207,8 +276,7 @@ async function tryGemini(
 async function tryGroq(
   dataUrl: string,
   prompt: string,
-  defaultSubject: string,
-  defaultExamTaker: string
+  defaultSubject: string
 ): Promise<{ questions: ReturnType<typeof cleanQuestions> } | { error: string }> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
@@ -272,8 +340,7 @@ async function tryGroq(
       const parsed = JSON.parse(content);
       const questions = cleanQuestions(
         Array.isArray(parsed.questions) ? parsed.questions : [],
-        defaultSubject,
-        defaultExamTaker
+        defaultSubject
       );
 
       if (questions.length === 0) {
@@ -297,7 +364,6 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     const defaultSubject = (formData.get("defaultSubject") as string) || "";
-    const defaultExamTaker = (formData.get("defaultExamTaker") as string) || "";
 
     if (!file) {
       return NextResponse.json(
@@ -315,21 +381,26 @@ export async function POST(request: Request) {
       );
     }
 
+    // ১. প্রথমে ডাটাবেজ থেকে existing subject/topic/sub_topic আনো
+    const existing = await fetchExistingTaxonomy();
+    console.log(
+      `Existing taxonomy loaded — subjects: ${existing.subjects.length}, topics: ${existing.topics.length}, subTopics: ${existing.subTopics.length}`
+    );
+
     const bytes = await file.arrayBuffer();
     const base64Data = Buffer.from(bytes).toString("base64");
     const mimeType = file.type || "image/jpeg";
     const dataUrl = `data:${mimeType};base64,${base64Data}`;
 
-    const prompt = buildPrompt(defaultSubject, defaultExamTaker);
+    const prompt = buildPrompt(defaultSubject, existing);
 
-    // ১. প্রথমে Gemini চেষ্টা
+    // ২. প্রথমে Gemini চেষ্টা
     console.log("Trying Gemini (primary)...");
     const geminiResult = await tryGemini(
       base64Data,
       mimeType,
       prompt,
-      defaultSubject,
-      defaultExamTaker
+      defaultSubject
     );
 
     if ("questions" in geminiResult) {
@@ -341,13 +412,8 @@ export async function POST(request: Request) {
 
     console.warn("Gemini failed → falling back to Groq. Reason:", geminiResult.error);
 
-    // ২. Gemini ব্যর্থ হলে Groq ফলব্যাক
-    const groqResult = await tryGroq(
-      dataUrl,
-      prompt,
-      defaultSubject,
-      defaultExamTaker
-    );
+    // ৩. Gemini ব্যর্থ হলে Groq ফলব্যাক
+    const groqResult = await tryGroq(dataUrl, prompt, defaultSubject);
 
     if ("questions" in groqResult) {
       return NextResponse.json(
