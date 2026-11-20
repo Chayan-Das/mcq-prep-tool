@@ -11,9 +11,8 @@
 
 body {
   background-image: 
-    linear-gradient(rgba(226, 226, 226, 0.301), rgba(215, 215, 216, 0.342)), url('/design.jpg');
-  background-size: cover;
-  background-attachment: fixed;
+    linear-gradient(rgba(194, 194, 194, 0.466), rgba(189, 189, 189, 0.507)), url('/design.jpg');
   color: var(--color-charcoal);
   font-family: var(--font-bengali), Arial, Helvetica, sans-serif;
+  
 }
