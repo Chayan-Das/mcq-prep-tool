@@ -1,21 +1,16 @@
 "use client";
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 export default function Navbar() {
   const pathname = usePathname();
+  const router = useRouter();
 
   // হোমপেজ ("/") হলে নেভবার হাইড থাকবে
   if (pathname === "/") {
     return null;
   }
-
-  const navLinks = [
-    { name: "পরীক্ষা দিন", href: "/exam" },
-    { name: "প্রশ্নপত্র তৈরি", href: "/create-paper" },
-    { name: "প্রশ্ন ব্যাংক", href: "/admin" },
-  ];
 
   return (
     <header className="sticky top-0 z-50 w-full bg-white border-b border-gray-200 print:hidden">
@@ -33,24 +28,20 @@ export default function Navbar() {
           </span>
         </Link>
 
-        <nav className="flex items-center gap-1 sm:gap-3">
-          {navLinks.map((link) => {
-            const isActive = pathname === link.href;
-            return (
-              <Link
-                key={link.href}
-                href={link.href}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  isActive
-                    ? "bg-[#15362C] text-white"
-                    : "text-gray-700 hover:bg-gray-100 hover:text-[#15362C]"
-                }`}
-              >
-                {link.name}
-              </Link>
-            );
-          })}
-        </nav>
+        <button
+          type="button"
+          onClick={() => router.back()}
+          className="p-1.5 rounded-full hover:bg-gray-100 active:bg-gray-200 transition-colors"
+          aria-label="Back"
+        >
+          <Image
+            src="/leftCircle.svg"
+            alt="back"
+            width={26}
+            height={26}
+            className="object-contain rounded-full"
+          />
+        </button>
       </div>
     </header>
   );

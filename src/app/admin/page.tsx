@@ -30,8 +30,6 @@ export default function AdminPage() {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [defaultSubject, setDefaultSubject] = useState("");
-  const [defaultExamTaker, setDefaultExamTaker] = useState("");
 
   const [extractedList, setExtractedList] = useState<ExtractedQuestion[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
@@ -78,21 +76,18 @@ export default function AdminPage() {
         const contrast = 1.35;
         const brightness = 12;
         for (let i = 0; i < len; i += 4) {
-          // Grayscale (luminance)
           let gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-          // Contrast + brightness
           gray = (gray - 128) * contrast + 128 + brightness;
           gray = Math.max(0, Math.min(255, gray));
           data[i] = data[i + 1] = data[i + 2] = gray;
         }
 
-        // 2. Light Unsharp Mask (sharpening) - helps blurry text
+        // 2. Light Unsharp Mask
         const sharpData = new Uint8ClampedArray(data);
-        const amount = 0.6; // sharpen strength (0.4–0.8 safe for text)
+        const amount = 0.6;
         for (let y = 1; y < h - 1; y++) {
           for (let x = 1; x < w - 1; x++) {
             const idx = (y * w + x) * 4;
-            // Simple 3x3 laplacian-ish
             const center = data[idx];
             const neighbors =
               data[((y - 1) * w + x) * 4] +
@@ -106,7 +101,6 @@ export default function AdminPage() {
           }
         }
 
-        // Copy sharpened data back
         for (let i = 0; i < len; i++) {
           data[i] = sharpData[i];
         }
@@ -184,13 +178,10 @@ export default function AdminPage() {
     });
 
     try {
-      // অস্পষ্ট ছবির জন্য হালকা এনহ্যান্সমেন্ট
       const enhancedFile = await enhanceImage(file);
 
       const formData = new FormData();
       formData.append("file", enhancedFile);
-      if (defaultSubject.trim()) formData.append("defaultSubject", defaultSubject.trim());
-      if (defaultExamTaker.trim()) formData.append("defaultExamTaker", defaultExamTaker.trim());
 
       const res = await fetch("/api/ocr-extract", {
         method: "POST",
@@ -381,35 +372,6 @@ export default function AdminPage() {
         onSubmit={handleAiExtract}
         className="bg-white border border-gray-200/90 rounded-2xl p-4 sm:p-5 shadow-2xs space-y-4"
       >
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">
-              ডিফল্ট বিষয় <span className="text-gray-400 font-normal">(ঐচ্ছিক)</span>
-            </label>
-            <input
-              type="text"
-              list="subject-list"
-              value={defaultSubject}
-              onChange={(e) => setDefaultSubject(e.target.value)}
-              placeholder="যেমন: সাধারণ জ্ঞান"
-              className="w-full px-3 py-2 text-sm bg-gray-50/60 border border-gray-200 rounded-xl focus:bg-white focus:border-[#15362C] outline-none transition"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">
-              ডিফল্ট পরীক্ষার নাম <span className="text-gray-400 font-normal">(ঐচ্ছিক)</span>
-            </label>
-            <input
-              type="text"
-              list="examtaker-list"
-              value={defaultExamTaker}
-              onChange={(e) => setDefaultExamTaker(e.target.value)}
-              placeholder="যেমন: ৪৬তম বিসিএস প্রিলি"
-              className="w-full px-3 py-2 text-sm bg-gray-50/60 border border-gray-200 rounded-xl focus:bg-white focus:border-[#15362C] outline-none transition"
-            />
-          </div>
-        </div>
-
         <div
           onDragOver={(e) => {
             e.preventDefault();
@@ -428,7 +390,6 @@ export default function AdminPage() {
               : "border-gray-300 hover:border-[#15362C] bg-gray-50/70"
           }`}
         >
-          {/* Gallery input */}
           <input
             ref={fileInputRef}
             type="file"
@@ -436,7 +397,6 @@ export default function AdminPage() {
             onChange={(e) => handleFileSelect(e.target.files?.[0] || null)}
             className="hidden"
           />
-          {/* Camera input - Android/iOS এ সরাসরি ক্যামেরা খুলবে */}
           <input
             ref={cameraInputRef}
             type="file"
@@ -518,9 +478,7 @@ export default function AdminPage() {
               <span>AI প্রশ্নগুলো স্ক্যান করছে...</span>
             </>
           ) : (
-            <>
-              <span>⚡ ছবি স্ক্যান করে ব্যাচ তৈরি করুন</span>
-            </>
+            <span>⚡ ছবি স্ক্যান করে ব্যাচ তৈরি করুন</span>
           )}
         </button>
       </form>
