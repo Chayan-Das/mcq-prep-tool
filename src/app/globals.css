@@ -10,7 +10,10 @@
 }
 
 body {
-  background-color: var(--color-body);
+  background-image: 
+    linear-gradient(rgba(226, 226, 226, 0.301), rgba(215, 215, 216, 0.342)), url('/design.jpg');
+  background-size: cover;
+  background-attachment: fixed;
   color: var(--color-charcoal);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-bengali), Arial, Helvetica, sans-serif;
 }
