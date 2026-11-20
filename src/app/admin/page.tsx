@@ -42,7 +42,101 @@ export default function AdminPage() {
   }>({ message: "", type: "" });
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const optionLabels = ["ক", "খ", "গ", "ঘ"];
+
+  // OCR-এর জন্য ছবি এনহ্যান্সমেন্ট (Grayscale + Contrast + Unsharp Mask)
+  const enhanceImage = (file: File): Promise<File> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const maxSide = 2000;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxSide || h > maxSide) {
+          const ratio = Math.min(maxSide / w, maxSide / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          URL.revokeObjectURL(url);
+          resolve(file);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, w, h);
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const data = imageData.data;
+        const len = data.length;
+
+        // 1. Grayscale + Contrast stretch + mild brightness
+        const contrast = 1.35;
+        const brightness = 12;
+        for (let i = 0; i < len; i += 4) {
+          // Grayscale (luminance)
+          let gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          // Contrast + brightness
+          gray = (gray - 128) * contrast + 128 + brightness;
+          gray = Math.max(0, Math.min(255, gray));
+          data[i] = data[i + 1] = data[i + 2] = gray;
+        }
+
+        // 2. Light Unsharp Mask (sharpening) - helps blurry text
+        const sharpData = new Uint8ClampedArray(data);
+        const amount = 0.6; // sharpen strength (0.4–0.8 safe for text)
+        for (let y = 1; y < h - 1; y++) {
+          for (let x = 1; x < w - 1; x++) {
+            const idx = (y * w + x) * 4;
+            // Simple 3x3 laplacian-ish
+            const center = data[idx];
+            const neighbors =
+              data[((y - 1) * w + x) * 4] +
+              data[((y + 1) * w + x) * 4] +
+              data[(y * w + (x - 1)) * 4] +
+              data[(y * w + (x + 1)) * 4];
+            const blurred = neighbors / 4;
+            let val = center + amount * (center - blurred);
+            val = Math.max(0, Math.min(255, val));
+            sharpData[idx] = sharpData[idx + 1] = sharpData[idx + 2] = val;
+          }
+        }
+
+        // Copy sharpened data back
+        for (let i = 0; i < len; i++) {
+          data[i] = sharpData[i];
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+
+        canvas.toBlob(
+          (blob) => {
+            URL.revokeObjectURL(url);
+            if (blob) {
+              resolve(
+                new File([blob], file.name.replace(/\.\w+$/, "") + "_enhanced.jpg", {
+                  type: "image/jpeg",
+                })
+              );
+            } else {
+              resolve(file);
+            }
+          },
+          "image/jpeg",
+          0.92
+        );
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(file);
+      };
+      img.src = url;
+    });
+  };
 
   const fetchSuggestions = async () => {
     try {
@@ -84,14 +178,20 @@ export default function AdminPage() {
     if (!file) return;
 
     setAiLoading(true);
-    setStatus({ message: "", type: "" });
-
-    const formData = new FormData();
-    formData.append("file", file);
-    if (defaultSubject.trim()) formData.append("defaultSubject", defaultSubject.trim());
-    if (defaultExamTaker.trim()) formData.append("defaultExamTaker", defaultExamTaker.trim());
+    setStatus({
+      message: "ছবি পরিষ্কার করে AI স্ক্যান করছে... (অস্পষ্ট ছবি হলেও চেষ্টা চলছে)",
+      type: "info",
+    });
 
     try {
+      // অস্পষ্ট ছবির জন্য হালকা এনহ্যান্সমেন্ট
+      const enhancedFile = await enhanceImage(file);
+
+      const formData = new FormData();
+      formData.append("file", enhancedFile);
+      if (defaultSubject.trim()) formData.append("defaultSubject", defaultSubject.trim());
+      if (defaultExamTaker.trim()) formData.append("defaultExamTaker", defaultExamTaker.trim());
+
       const res = await fetch("/api/ocr-extract", {
         method: "POST",
         body: formData,
@@ -322,17 +422,26 @@ export default function AdminPage() {
             const dropped = e.dataTransfer.files?.[0] || null;
             handleFileSelect(dropped);
           }}
-          onClick={() => fileInputRef.current?.click()}
-          className={`cursor-pointer border-2 border-dashed rounded-2xl p-5 text-center transition-all ${
+          className={`border-2 border-dashed rounded-2xl p-5 text-center transition-all ${
             isDragging
               ? "border-[#15362C] bg-[#15362C]/5 scale-[1.01]"
               : "border-gray-300 hover:border-[#15362C] bg-gray-50/70"
           }`}
         >
+          {/* Gallery input */}
           <input
             ref={fileInputRef}
             type="file"
             accept="image/*"
+            onChange={(e) => handleFileSelect(e.target.files?.[0] || null)}
+            className="hidden"
+          />
+          {/* Camera input - Android/iOS এ সরাসরি ক্যামেরা খুলবে */}
+          <input
+            ref={cameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
             onChange={(e) => handleFileSelect(e.target.files?.[0] || null)}
             className="hidden"
           />
@@ -348,20 +457,52 @@ export default function AdminPage() {
                 />
               </div>
               <p className="text-xs font-semibold text-[#15362C]">
-                📄 {file?.name} (ছবি পরিবর্তন করতে এখানে ক্লিক করুন)
+                📄 {file?.name}
               </p>
+              <div className="flex flex-wrap justify-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white border border-gray-300 text-gray-700 hover:border-[#15362C] hover:text-[#15362C] transition"
+                >
+                  📁 গ্যালারি থেকে বদলান
+                </button>
+                <button
+                  type="button"
+                  onClick={() => cameraInputRef.current?.click()}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#15362C] text-white hover:bg-[#1e4a3d] transition"
+                >
+                  📷 ক্যামেরা দিয়ে নতুন তুলুন
+                </button>
+              </div>
             </div>
           ) : (
-            <div className="py-4 space-y-2">
+            <div className="py-4 space-y-3">
               <div className="w-12 h-12 mx-auto rounded-full bg-[#15362C]/10 text-[#15362C] flex items-center justify-center text-2xl">
                 📸
               </div>
               <p className="text-sm font-semibold text-gray-800">
-                প্রশ্নপত্রের ছবি এখানে ড্র্যাগ করুন বা ক্লিক করে সিলেক্ট করুন
+                প্রশ্নপত্রের ছবি আপলোড করুন
               </p>
               <p className="text-xs text-gray-400">
-                সাপোর্টেড ফরম্যাট: JPG, PNG, WEBP (পরিষ্কার ও সোজা ছবি দিন)
+                অস্পষ্ট ছবি হলেও AI চেষ্টা করবে • JPG, PNG, WEBP
               </p>
+              <div className="flex flex-wrap justify-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-4 py-2 text-sm font-medium rounded-xl bg-white border border-gray-300 text-gray-700 hover:border-[#15362C] hover:text-[#15362C] transition"
+                >
+                  📁 গ্যালারি থেকে বাছাই
+                </button>
+                <button
+                  type="button"
+                  onClick={() => cameraInputRef.current?.click()}
+                  className="px-4 py-2 text-sm font-medium rounded-xl bg-[#15362C] text-white hover:bg-[#1e4a3d] transition"
+                >
+                  📷 ক্যামেরা দিয়ে তুলুন
+                </button>
+              </div>
             </div>
           )}
         </div>
