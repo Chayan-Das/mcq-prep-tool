@@ -8,10 +8,10 @@ const MAX_FILE_BYTES = 3 * 1024 * 1024;
 
 // Gemini প্রাইমারি মডেল (ভিশন ভালো)
 const GEMINI_MODELS = [
-  "gemini-3.8-flash",
-  "gemini-3.6-flash",
+ "gemini-3.6-flash",
   "gemini-3.5-flash-lite",
   "gemini-4-hydrogen",
+  "gemini-3.8-flash",
 ];
 
 // Groq ফলব্যাক মডেল
