@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// Gemini models (text)
+// Gemini models (text) — আগের model fallback তালিকা অপরিবর্তিত রাখা হয়েছে।
 const GEMINI_MODELS = [
   "gemini-3.6-flash",
   "gemini-3.5-flash-lite",
@@ -19,46 +19,89 @@ const GROQ_TEXT_MODELS = [
   "qwen/qwen3-vl-8b-instruct",
 ];
 
+const MAX_AI_EXISTING_QUESTIONS = 80;
+
+type MatchType = "exact" | "semantic";
+
+type MatchPair = {
+  newIndex: number;
+  existingIndex: number;
+};
+
+type ExistingQuestion = {
+  question: string;
+  options: string[];
+  correct_answer_index: number;
+  subject?: string;
+  topic?: string;
+  sub_topic?: string;
+  exam_taker?: string;
+  matchType: MatchType;
+};
+
+type DuplicateMatch = {
+  index: number;
+  existing: ExistingQuestion;
+};
+
+/**
+ * প্রশ্ন normalize করে exact/near-exact duplicate খুঁজে বের করে।
+ * বাংলা ও ইংরেজি ডিজিট, punctuation এবং অতিরিক্ত whitespace সামলায়।
+ */
 function normalizeText(text: string): string {
   return text
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ")
     .replace(/[।?!.,;:'"()\-–—]/g, "")
-    .replace(/[০-৯]/g, (d) => String("০১২৩৪৫৬৭৮৯".indexOf(d)));
+    .replace(/[০-৯]/g, (digit) =>
+      String("০১২৩৪৫৬৭৮৯".indexOf(digit)),
+    );
 }
 
-function buildPrompt(newList: string, existingList: string) {
+/** AI-কে নতুন প্রশ্নের সঙ্গে database প্রশ্নের index মিলিয়ে দিতে বলা হয়। */
+function buildPrompt(newList: string, existingList: string): string {
   return `তুমি একজন বাংলাদেশি চাকরির পরীক্ষার প্রশ্ন বিশেষজ্ঞ।
-নিচের নতুন প্রশ্নগুলো এবং ডাটাবেজের পুরনো প্রশ্নগুলো তুলনা করো।
+নিচের নতুন প্রশ্নগুলো এবং ডাটাবেজের পুরনো প্রশ্নগুলো মনোযোগ দিয়ে তুলনা করো।
 
 শুধুমাত্র সেই নতুন প্রশ্নগুলোকে ডুপ্লিকেট বলবে যেগুলো:
-- একই প্রশ্ন (শুধু শব্দ সাজানো বা সামান্য পরিবর্তন)
-- অর্থ একই (semantic same)
-- উত্তরও একই হবে এমন
+- একই প্রশ্ন, শুধু শব্দের সাজানো বা সামান্য ভাষাগত পার্থক্য আছে; অথবা
+- প্রশ্নের অর্থ একই (semantic same); এবং
+- প্রশ্ন দুটির সঠিক উত্তর একই হবে।
 
-শুধু JSON রিটার্ন করো, অন্য কিছু না:
+শুধু একই বিষয় বা একই topic হলেই ডুপ্লিকেট বলবে না।
+নিশ্চিত মিল না পেলে ডুপ্লিকেট বলবে না।
+
+প্রতিটি ডুপ্লিকেটের ক্ষেত্রে নতুন প্রশ্নের index (newIndex) এবং যে পুরনো প্রশ্নটির সঙ্গে মিলেছে তার E-index (existingIndex) দেবে।
+একটি নতুন প্রশ্নের জন্য সবচেয়ে কাছের একটি পুরনো প্রশ্ন নির্বাচন করবে।
+শুধু valid JSON রিটার্ন করবে, অন্য কোনো লেখা নয়:
 {
-  "duplicateIndices": [0, 2]
+  "matches": [
+    { "newIndex": 0, "existingIndex": 2 }
+  ]
 }
 
 নতুন প্রশ্নসমূহ:
 ${newList}
 
-ডাটাবেজের পুরনো প্রশ্ন (নমুনা):
+ডাটাবেজের পুরনো প্রশ্নসমূহ:
 ${existingList}
 `;
 }
 
+/** AI response-এর JSON অংশ বের করে। */
 function extractJson(content: string): any | null {
-  let cleaned = content
+  const cleaned = content
     .replace(/```json\s*/gi, "")
     .replace(/```\s*/g, "")
     .trim();
 
   const firstBrace = cleaned.indexOf("{");
   const lastBrace = cleaned.lastIndexOf("}");
-  if (firstBrace === -1 || lastBrace === -1) return null;
+
+  if (firstBrace === -1 || lastBrace === -1) {
+    return null;
+  }
 
   try {
     return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
@@ -67,14 +110,53 @@ function extractJson(content: string): any | null {
   }
 }
 
+/** AI-এর দেওয়া index valid range-এর মধ্যে আছে কি না যাচাই করে। */
+function parseMatches(
+  parsed: any,
+  newQuestionsLength: number,
+  existingQuestionsLength: number,
+): MatchPair[] {
+  if (!Array.isArray(parsed?.matches)) {
+    return [];
+  }
+
+  const validMatches = parsed.matches
+    .map((match: any) => ({
+      newIndex: Number(match?.newIndex),
+      existingIndex: Number(match?.existingIndex),
+    }))
+    .filter(
+      (match: MatchPair) =>
+        Number.isInteger(match.newIndex) &&
+        match.newIndex >= 0 &&
+        match.newIndex < newQuestionsLength &&
+        Number.isInteger(match.existingIndex) &&
+        match.existingIndex >= 0 &&
+        match.existingIndex < existingQuestionsLength,
+    );
+
+  // একই নতুন প্রশ্নের একাধিক match এলে প্রথম valid match রাখা হয়।
+  const uniqueByNewIndex = new Map<number, MatchPair>();
+  for (const match of validMatches) {
+    if (!uniqueByNewIndex.has(match.newIndex)) {
+      uniqueByNewIndex.set(match.newIndex, match);
+    }
+  }
+
+  return Array.from(uniqueByNewIndex.values());
+}
+
+/** Gemini primary provider. null মানে Gemini-তে valid response পাওয়া যায়নি। */
 async function tryGemini(
   prompt: string,
   newQuestionsLength: number,
-): Promise<number[]> {
+  existingQuestionsLength: number,
+): Promise<MatchPair[] | null> {
   const apiKey = process.env.GEMINI_API_KEY;
+
   if (!apiKey) {
     console.warn("GEMINI_API_KEY missing → skipping Gemini");
-    return [];
+    return null;
   }
 
   for (const model of GEMINI_MODELS) {
@@ -83,58 +165,65 @@ async function tryGemini(
 
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 512,
+            maxOutputTokens: 1024,
           },
         }),
       });
 
       if (!response.ok) {
-        console.warn(`[AI Dup Gemini] ${model} failed:`, response.status);
+        console.warn(
+          `[AI Dup Gemini] ${model} failed:`,
+          response.status,
+        );
         continue;
       }
 
       const data = await response.json();
-      const text =
-        data.candidates?.[0]?.content?.parts?.[0]?.text ||
+      const responseText =
         data.candidates?.[0]?.content?.parts
-          ?.map((p: any) => p.text)
-          .join("") ||
-        "";
+          ?.map((part: any) => part.text || "")
+          .join("") || "";
 
-      const parsed = extractJson(text);
-      if (!parsed) continue;
+      const parsed = extractJson(responseText);
+      if (!parsed) {
+        continue;
+      }
 
-      const indices = Array.isArray(parsed.duplicateIndices)
-        ? parsed.duplicateIndices
-            .map((n: unknown) => Number(n))
-            .filter(
-              (n: number) =>
-                Number.isInteger(n) && n >= 0 && n < newQuestionsLength,
-            )
-        : [];
+      const matches = parseMatches(
+        parsed,
+        newQuestionsLength,
+        existingQuestionsLength,
+      );
 
       console.log(
-        `[AI Dup Gemini] ${model} found ${indices.length} semantic duplicates`,
+        `[AI Dup Gemini] ${model} found ${matches.length} semantic matches`,
       );
-      return indices;
-    } catch (err) {
-      console.error(`[AI Dup Gemini] ${model} exception:`, err);
+
+      // Valid JSON-এ empty matches থাকলেও Gemini সফলভাবে উত্তর দিয়েছে।
+      return matches;
+    } catch (error) {
+      console.error(`[AI Dup Gemini] ${model} exception:`, error);
     }
   }
 
-  return [];
+  return null;
 }
 
+/** Gemini ব্যর্থ/অনুপলব্ধ হলে Groq fallback চলে। */
 async function tryGroq(
   prompt: string,
   newQuestionsLength: number,
-): Promise<number[]> {
+  existingQuestionsLength: number,
+): Promise<MatchPair[]> {
   const apiKey = process.env.GROQ_API_KEY;
+
   if (!apiKey) {
     console.warn("GROQ_API_KEY missing → skipping Groq");
     return [];
@@ -152,66 +241,110 @@ async function tryGroq(
           model,
           messages: [{ role: "user", content: prompt }],
           temperature: 0.1,
-          max_tokens: 512,
+          max_tokens: 1024,
         }),
       });
 
       if (!response.ok) {
-        console.warn(`[AI Dup Groq] ${model} failed:`, response.status);
+        console.warn(
+          `[AI Dup Groq] ${model} failed:`,
+          response.status,
+        );
         continue;
       }
 
       const data = await response.json();
       const content = data.choices?.[0]?.message?.content || "";
       const parsed = extractJson(content);
-      if (!parsed) continue;
 
-      const indices = Array.isArray(parsed.duplicateIndices)
-        ? parsed.duplicateIndices
-            .map((n: unknown) => Number(n))
-            .filter(
-              (n: number) =>
-                Number.isInteger(n) && n >= 0 && n < newQuestionsLength,
-            )
-        : [];
+      if (!parsed) {
+        continue;
+      }
+
+      const matches = parseMatches(
+        parsed,
+        newQuestionsLength,
+        existingQuestionsLength,
+      );
 
       console.log(
-        `[AI Dup Groq] ${model} found ${indices.length} semantic duplicates`,
+        `[AI Dup Groq] ${model} found ${matches.length} semantic matches`,
       );
-      return indices;
-    } catch (err) {
-      console.error(`[AI Dup Groq] ${model} exception:`, err);
+
+      return matches;
+    } catch (error) {
+      console.error(`[AI Dup Groq] ${model} exception:`, error);
     }
   }
 
   return [];
 }
 
+/** Gemini primary → Groq fallback semantic duplicate check. */
 async function aiSemanticCheck(
   newQuestions: string[],
   existingQuestions: string[],
-): Promise<number[]> {
+): Promise<MatchPair[]> {
   if (newQuestions.length === 0 || existingQuestions.length === 0) {
     return [];
   }
 
-  const existingSample = existingQuestions.slice(0, 80);
+  // আগের implementation-এর মতো AI prompt-এ সর্বোচ্চ ৮০টি পুরনো প্রশ্ন যায়।
+  const existingSample = existingQuestions.slice(
+    0,
+    MAX_AI_EXISTING_QUESTIONS,
+  );
 
-  const newList = newQuestions.map((q, i) => `[${i}] ${q}`).join("\n");
-  const existingList = existingSample.map((q, i) => `[E${i}] ${q}`).join("\n");
+  const newList = newQuestions
+    .map((question, index) => `[${index}] ${question}`)
+    .join("\n");
+
+  const existingList = existingSample
+    .map((question, index) => `[E${index}] ${question}`)
+    .join("\n");
 
   const prompt = buildPrompt(newList, existingList);
 
-  // 1. Gemini primary
-  const geminiResult = await tryGemini(prompt, newQuestions.length);
-  if (geminiResult.length > 0 || process.env.GEMINI_API_KEY) {
-    // Gemini কাজ করেছে বা key আছে → result রিটার্ন (খালি হলেও)
-    if (geminiResult.length > 0) return geminiResult;
+  // 1) Gemini primary
+  const geminiResult = await tryGemini(
+    prompt,
+    newQuestions.length,
+    existingSample.length,
+  );
+
+  if (geminiResult !== null) {
+    return geminiResult;
   }
 
-  // 2. Groq fallback
-  console.warn("Gemini failed or empty → falling back to Groq");
-  return await tryGroq(prompt, newQuestions.length);
+  // 2) Gemini unavailable/failed হলে Groq fallback
+  console.warn("Gemini failed or unavailable → falling back to Groq");
+
+  return await tryGroq(
+    prompt,
+    newQuestions.length,
+    existingSample.length,
+  );
+}
+
+/** Database document থেকে UI-তে দেখানোর জন্য নিরাপদ match object বানায়। */
+function toExistingQuestion(
+  doc: any,
+  matchType: MatchType,
+): ExistingQuestion {
+  return {
+    question: String(doc.question || ""),
+    options: Array.isArray(doc.options)
+      ? doc.options.map((option: unknown) => String(option ?? ""))
+      : [],
+    correct_answer_index: Number.isInteger(Number(doc.correct_answer_index))
+      ? Number(doc.correct_answer_index)
+      : -1,
+    subject: doc.subject ? String(doc.subject) : undefined,
+    topic: doc.topic ? String(doc.topic) : undefined,
+    sub_topic: doc.sub_topic ? String(doc.sub_topic) : undefined,
+    exam_taker: doc.exam_taker ? String(doc.exam_taker) : undefined,
+    matchType,
+  };
 }
 
 export async function POST(request: Request) {
@@ -221,65 +354,163 @@ export async function POST(request: Request) {
     const useAI: boolean = body.useAI !== false; // default true
 
     if (!Array.isArray(questions) || questions.length === 0) {
-      return NextResponse.json({ success: true, duplicateIndices: [] });
+      return NextResponse.json({
+        success: true,
+        duplicateIndices: [],
+        duplicateMatches: [],
+        exactCount: 0,
+        semanticCount: 0,
+        batchDuplicateIndices: [],
+      });
     }
+
+    // Empty/non-string input বাদ দিয়ে original index অক্ষুণ্ণ রাখা।
+    const validQuestions = questions.map((question) =>
+      typeof question === "string" ? question : String(question ?? ""),
+    );
 
     const client = await clientPromise;
     const db = client.db("mcq_database");
+
+    // পুরোনো প্রশ্নের সঙ্গে comparison এবং review UI-তে দেখানোর জন্য প্রয়োজনীয় field।
     const existingDocs = await db
       .collection("questions")
-      .find({}, { projection: { question: 1, normalized_question: 1 } })
+      .find(
+        {},
+        {
+          projection: {
+            question: 1,
+            normalized_question: 1,
+            options: 1,
+            correct_answer_index: 1,
+            subject: 1,
+            topic: 1,
+            sub_topic: 1,
+            exam_taker: 1,
+          },
+        },
+      )
       .toArray();
 
-    const existingNormalized = existingDocs.map((doc) =>
-      doc.normalized_question
-        ? String(doc.normalized_question)
-        : normalizeText(String(doc.question || "")),
+    // normalized question → database document index
+    const existingByNormalized = new Map<string, number>();
+    const existingRaw = existingDocs.map((doc) =>
+      String(doc.question || ""),
     );
-    const existingSet = new Set<string>(existingNormalized);
-    const existingRaw = existingDocs.map((doc) => String(doc.question || ""));
 
-    // 1) Exact + normalized check (fast)
-    const seenInBatch = new Set<string>();
-    const exactDuplicateIndices: number[] = [];
-    const nonExactQuestions: string[] = [];
-    const nonExactOriginalIndices: number[] = [];
+    existingDocs.forEach((doc, index) => {
+      const normalized = doc.normalized_question
+        ? String(doc.normalized_question)
+        : normalizeText(String(doc.question || ""));
 
-    questions.forEach((q, idx) => {
-      const norm = normalizeText(q || "");
-      if (existingSet.has(norm) || seenInBatch.has(norm)) {
-        exactDuplicateIndices.push(idx);
-      } else {
-        seenInBatch.add(norm);
-        nonExactQuestions.push(q);
-        nonExactOriginalIndices.push(idx);
+      if (normalized && !existingByNormalized.has(normalized)) {
+        existingByNormalized.set(normalized, index);
       }
     });
 
-    // 2) AI semantic check
+    const duplicateMatches = new Map<number, ExistingQuestion>();
+    const seenInBatch = new Map<string, number>();
+    const exactDuplicateIndices: number[] = [];
+    const batchDuplicateIndices: number[] = [];
+    const nonExactQuestions: string[] = [];
+    const nonExactOriginalIndices: number[] = [];
+
+    // 1) Exact/normalized database duplicate + same-upload batch duplicate check
+    validQuestions.forEach((question, index) => {
+      const normalized = normalizeText(question || "");
+
+      if (!normalized) {
+        return;
+      }
+
+      const existingIndex = existingByNormalized.get(normalized);
+
+      if (existingIndex !== undefined) {
+        const existingDoc = existingDocs[existingIndex];
+
+        duplicateMatches.set(
+          index,
+          toExistingQuestion(existingDoc, "exact"),
+        );
+        exactDuplicateIndices.push(index);
+        return;
+      }
+
+      // একই batch-এ আগে আসা প্রশ্নের সঙ্গে মিল; database duplicate নয়।
+      if (seenInBatch.has(normalized)) {
+        batchDuplicateIndices.push(index);
+        return;
+      }
+
+      seenInBatch.set(normalized, index);
+      nonExactQuestions.push(question);
+      nonExactOriginalIndices.push(index);
+    });
+
+    // 2) AI semantic check — কেবল exact match নয় এমন প্রশ্নের জন্য।
     let semanticDuplicateIndices: number[] = [];
+
     if (useAI && nonExactQuestions.length > 0 && existingRaw.length > 0) {
-      const relativeIndices = await aiSemanticCheck(
+      const semanticMatches = await aiSemanticCheck(
         nonExactQuestions,
         existingRaw,
       );
-      semanticDuplicateIndices = relativeIndices.map(
-        (rel) => nonExactOriginalIndices[rel],
-      );
+
+      semanticMatches.forEach(({ newIndex, existingIndex }) => {
+        const originalQuestionIndex = nonExactOriginalIndices[newIndex];
+        const existingDoc = existingDocs[existingIndex];
+
+        if (
+          originalQuestionIndex === undefined ||
+          !existingDoc ||
+          duplicateMatches.has(originalQuestionIndex)
+        ) {
+          return;
+        }
+
+        duplicateMatches.set(
+          originalQuestionIndex,
+          toExistingQuestion(existingDoc, "semantic"),
+        );
+        semanticDuplicateIndices.push(originalQuestionIndex);
+      });
     }
 
-    const allDuplicates = Array.from(
-      new Set([...exactDuplicateIndices, ...semanticDuplicateIndices]),
-    ).sort((a, b) => a - b);
+    // 3) UI-তে ব্যবহারের জন্য আগের response field duplicateIndices বজায় রাখা।
+    const duplicateMatchesArray: DuplicateMatch[] = Array.from(
+      duplicateMatches.entries(),
+    )
+      .map(([index, existing]) => ({ index, existing }))
+      .sort((a, b) => a.index - b.index);
+
+    const duplicateIndices = duplicateMatchesArray.map(
+      (match) => match.index,
+    );
 
     return NextResponse.json({
       success: true,
-      duplicateIndices: allDuplicates,
+      duplicateIndices,
+      duplicateMatches: duplicateMatchesArray,
       exactCount: exactDuplicateIndices.length,
       semanticCount: semanticDuplicateIndices.length,
+      // একই আপলোড batch-এর duplicate আলাদা field-এ ফেরত যায়,
+      // যাতে এগুলোকে ভুল করে database-এ আগে থেকে থাকা প্রশ্ন বলা না হয়।
+      batchDuplicateIndices,
     });
-  } catch (err) {
-    console.error("check-duplicates error:", err);
-    return NextResponse.json({ success: false, duplicateIndices: [] });
+  } catch (error) {
+    console.error("check-duplicates error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "ডুপ্লিকেট যাচাই করার সময় সার্ভারে সমস্যা হয়েছে।",
+        duplicateIndices: [],
+        duplicateMatches: [],
+        exactCount: 0,
+        semanticCount: 0,
+        batchDuplicateIndices: [],
+      },
+      { status: 500 },
+    );
   }
 }
